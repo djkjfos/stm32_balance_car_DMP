@@ -1,0 +1,24 @@
+# Build outputs
+build/
+Build/
+cmake-build-*/
+*.o
+*.obj
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.list
+
+# IDE temporary files
+.idea/
+.vscode/
+*.code-workspace
+*.user
+*.suo
+*.userprefs
+
+# OS files
+.DS_Store
+Thumbs.db
