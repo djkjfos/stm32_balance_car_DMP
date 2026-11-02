@@ -1,7 +1,11 @@
-# Build outputs
+# ===== 编译输出目录 =====
 build/
 Build/
 cmake-build-*/
+Debug/
+Release/
+
+# ===== 编译中间文件和固件 =====
 *.o
 *.obj
 *.elf
@@ -10,15 +14,39 @@ cmake-build-*/
 *.map
 *.lst
 *.list
+*.d
+*.su
 
-# IDE temporary files
+# ===== CMake 缓存 =====
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+
+# ===== IDE 临时文件 =====
 .idea/
 .vscode/
 *.code-workspace
 *.user
 *.suo
 *.userprefs
+*.swo
+*.swp
 
-# OS files
+# ===== Keil MDK-ARM 临时文件 =====
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.uvoptx
+MDK-ARM/*.bak
+MDK-ARM/JLinkLog.txt
+MDK-ARM/Listings/
+MDK-ARM/Objects/
+
+# ===== EWARM 临时文件 =====
+EWARM/Debug/
+EWARM/Release/
+EWARM/settings/
+
+# ===== 系统垃圾 =====
 .DS_Store
 Thumbs.db
+desktop.ini
