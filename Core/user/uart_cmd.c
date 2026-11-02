@@ -247,7 +247,7 @@ void Frame_Process(void)
     if (!strcmp(frame, "STAT")) {
         UART_Printf("STATE=%u FAULT=%u KP=%.2f KD=%.2f MDB=%.0f\r\n",
                     (unsigned)balance_state, (unsigned)balance_fault,
-                    pid_balance.kp, pid_balance.kd, motor_deadband);
+                    pid_balance.kp, pid_balance.kd, MDB);
         Balance_PrintDiagnostics();
         return;
     }
@@ -267,9 +267,9 @@ void Frame_Process(void)
     else if (!strcmp(frame, "TKP")) parameter = &pid_turn.kp;
     else if (!strcmp(frame, "ASP")) { parameter = &target_speed; limit = 500.0f; }
     else if (!strcmp(frame, "TAG")) { parameter = &target_turn; limit = 500.0f; }
-    else if (!strcmp(frame, "MDB")) { parameter = &motor_deadband; limit = PWM_MAX; }
+    else if (!strcmp(frame, "MDB")) { parameter = &MDB; limit = PWM_MAX; }
     if (parameter == NULL) { UART_Printf("ERR unknown command\r\n"); return; }
-    if (fabsf(value) > limit || ((parameter == &motor_deadband
+    if (fabsf(value) > limit || ((parameter == &MDB
         || parameter == &pid_position.kp || parameter == &pid_position.output_max) && value < 0.0f)) {
         UART_Printf("ERR value out of range\r\n"); return;
     }

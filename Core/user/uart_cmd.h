@@ -6,6 +6,7 @@
 #ifndef UART_CMD_H
 #define UART_CMD_H
 #include "usart.h"
+#include "config.h"
 #ifdef __cplusplus
 extern "C" {
 #endif

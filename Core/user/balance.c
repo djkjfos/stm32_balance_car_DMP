@@ -24,7 +24,6 @@
  */
 volatile BalanceState balance_state = BALANCE_CALIBRATING;
 volatile BalanceFault balance_fault = FAULT_NONE;
-float target_speed, target_turn;
 static volatile uint8_t pending_ticks;
 static uint16_t calibration_count;
 static float angle_sum, gyro_sum, angle_zero, gyro_zero;
@@ -247,10 +246,10 @@ HAL_StatusTypeDef Balance_Init(void)
     key_raw_pressed = key_stable_pressed = (uint8_t)
         (HAL_GPIO_ReadPin(USER_KEY_GPIO_Port, USER_KEY_Pin) == GPIO_PIN_RESET);
     key_changed_ms = HAL_GetTick();
-    PID_Init(&pid_balance, 180.0f, 0.0f, 5.0f, 0.0f, (float)PWM_MAX);
-    PID_Init(&pid_speed, 0.9f, 0.0045f, 0.0f, 8.0f, 30.0f);
-    PID_Init(&pid_position, 0.001f, 0.0f, 0.0f, 0.0f, 25.0f);
-    PID_Init(&pid_turn, 16.0f, 0.0f, 0.0f, 0.0f, (float)PWM_MAX * 0.5f);
+    PID_Init(&pid_balance, DKP, 0.0f, DKD, 0.0f, (float)PWM_MAX);
+    PID_Init(&pid_speed, VKP, VKI, 0.0f, V_integral_max, V_output_max);
+    PID_Init(&pid_position, PKP, 0.0f, 0.0f, 0.0f, P_output_max);
+    PID_Init(&pid_turn, TKP, 0.0f, 0.0f, 0.0f, (float)PWM_MAX * 0.5f);
     if (motor_Init() != HAL_OK || EncoderA_Init() != HAL_OK || EncoderB_Init() != HAL_OK) {
         fault_stop(FAULT_HARDWARE); return HAL_ERROR;
     }

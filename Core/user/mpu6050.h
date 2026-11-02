@@ -6,6 +6,8 @@
 #ifndef MPU6050_H
 #define MPU6050_H
 #include "stm32f1xx_hal.h"
+#include "config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,10 +25,7 @@ extern "C" {
 #define MPU6050_PWR_MGMT_1 0x6BU                        //电源管理 1
 #define MPU6050_PWR_MGMT_2 0x6CU                        //电源管理 2，轴开关
 #define MPU6050_WHO_AM_I 0x75U                          //芯片 ID 只读寄存器
-/*
- * 控制步长 0.005 秒=5ms，与 TIM1 的 200Hz 节拍及传感器采样设置一致。
- */
-#define DT 0.005f
+
 typedef struct {
     int16_t ax, ay, az;
     int16_t gx, gy, gz;
