@@ -6,6 +6,7 @@
 #ifndef BALANCE_H
 #define BALANCE_H
 #include "main.h"
+#include "config.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,8 +19,7 @@ typedef enum { FAULT_NONE, FAULT_IMU, FAULT_TILT, FAULT_OVERRUN, FAULT_HARDWARE 
  */
 extern volatile BalanceState balance_state;
 extern volatile BalanceFault balance_fault;
-extern float target_speed;
-extern float target_turn;
+
 HAL_StatusTypeDef Balance_Init(void);
 void Balance_OnTickISR(void);
 void Balance_Poll(void);

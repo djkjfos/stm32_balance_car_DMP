@@ -3,7 +3,6 @@
 #include <math.h>
 
 
-float motor_deadband = 65.0f;                                                            //死区补偿，65为佳值 ，非负数
 static volatile uint8_t enabled;                                                        //软件标志位，0为关闭，1为开启
 
 /*===================软件标志位拉低，STBY拉低，清除两路PWM=====================*/
@@ -56,7 +55,7 @@ static void set_speed(float command, GPIO_TypeDef *port1, uint16_t pin1,
     }
     HAL_GPIO_WritePin(port1, pin1, command > 0.0f ? GPIO_PIN_SET : GPIO_PIN_RESET);             //方向引脚
     HAL_GPIO_WritePin(port2, pin2, command > 0.0f ? GPIO_PIN_RESET : GPIO_PIN_SET);
-    duty = fminf(fabsf(command) + fmaxf(motor_deadband,0.0f), (float)PWM_MAX);                              //CCR，死区补偿与外部输入总和，判定上限
+    duty = fminf(fabsf(command) + fmaxf(MDB,0.0f), (float)PWM_MAX);                              //CCR，死区补偿与外部输入总和，判定上限
     __HAL_TIM_SET_COMPARE(&htim4, channel, (uint32_t)duty);
 }
 

@@ -7,6 +7,8 @@
 #ifndef MOTOR_H
 #define MOTOR_H
 #include "main.h"
+#include "config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -22,10 +24,9 @@ extern "C" {
 #define STBY_PIN GPIO_PIN_0
 #define PWMA_CH TIM_CHANNEL_1
 #define PWMB_CH TIM_CHANNEL_2
-#define PWM_MAX 3599U
 #define MOTOR_A_SIGN (1)
 #define MOTOR_B_SIGN (1)
-extern float motor_deadband;
+
 HAL_StatusTypeDef motor_Init(void);
 void Motor_Enable(void);
 void Motor_Disable(void);
