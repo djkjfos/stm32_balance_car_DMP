@@ -19,12 +19,6 @@ void PID_Init(pid_t *pid ,float kp, float ki, float kd, float integral_max, floa
     pid->output = 0;
 }
 
-/* -----------------停机/重启只清除位置状态（位置环重置，速度重置），不覆盖串口设置的参数------------------------*/
-void PID_PositionReset(void)
-{
-    pid_position.error = pid_position.integral = pid_position.output = 0.0f;
-    position_counts = position_speed_target = 0.0f;
-}
 
 /*
  * wheel_delta 是本周期两轮平均编码器增量；commanded_speed 是 ASP 速度指令。

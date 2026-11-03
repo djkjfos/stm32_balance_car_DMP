@@ -1,5 +1,4 @@
 /*
- * 平衡车控制调度与状态管理：先读 main.c 的主循环，再重点读 Balance_Poll。
  * 本文件把 MPU 姿态、编码器、PID 和电机连接起来；具体硬件操作在各驱动文件。
  * 状态编号：0=校准中，1=就绪/手动停止，2=运行，3=保护停机。
  * 正常控制周期为 5ms；只有 RUNNING 才向电机写入闭环控制量。
@@ -22,41 +21,30 @@
  * angle_zero：校准时的直立参考角，单位度；gyro_zero：X 轴零偏，单位原始计数。
  * target_speed：每 5ms 的目标平均编码器计数；target_turn：目标两轮计数之差。
  */
-volatile BalanceState balance_state = BALANCE_CALIBRATING;
-volatile BalanceFault balance_fault = FAULT_NONE;
-static volatile uint8_t pending_ticks;
-static uint16_t calibration_count;
+volatile BalanceState balance_state = BALANCE_CALIBRATING;                          //当前车体状态：校准中/就绪/运行/故障
+volatile BalanceFault balance_fault = FAULT_NONE;                                   //当前故障原因：无/IMU错误/倾倒/节拍超时/硬件错误。只有状态是FAULT时才有意义
+static volatile uint8_t pending_ticks;                                              //TIM1中断每5ms标志位
+static uint16_t calibration_count;                                                  //校准阶段已经采了多少个样本。采满200个就判断稳定性
 static float angle_sum, gyro_sum, angle_zero, gyro_zero;
-static uint32_t last_sample_ms;
-static uint8_t hardware_ready;
-static uint8_t sample_valid;
-static HAL_StatusTypeDef last_read_status = HAL_BUSY;
+static uint32_t last_sample_ms;                                                     //最后一次成功读到IMU的时间戳(ms)
+static uint8_t hardware_ready;                                                      //电机和编码器初始化是否成功。0=没好，1=好了
+static uint8_t sample_valid;                                                        //最近一次读IMU是否成功。1=数据有效，0=读失败
+static HAL_StatusTypeDef last_read_status = HAL_BUSY;                               //最近一次读IMU的HAL返回值
 /*
- * 下面是主要可调阈值。200 个样本在 200Hz 下约需 1 秒。
- * 倾倒恢复的 40 个有效样本约为 200ms，姿态滤波回到恢复范围所需时间另计。
- * 停机用 45 度、恢复用 10 度，两个不同阈值可避免在倒地边缘反复启停。
+ * 是否允许"扶正后自动恢复运行"。
+ * 只有运行中触发的FAULT_TILT才置1；其他故障锁死不恢复
  */
-#define CALIBRATION_SAMPLES 200U
-/* Cut both motor channels at either absolute or zero-relative X tilt. */
-#define TILT_STOP_DEG 45.0f
-#define TILT_RESUME_DEG 10.0f
-#define TILT_RESUME_GYRO 20.0f
-#define TILT_RESUME_SAMPLES 40U /* 200 ms at 200 Hz */
 static volatile uint8_t tilt_resume_pending;
-static uint16_t tilt_resume_count;
-/* A one-second statistics window tolerates sensor noise and isolated spikes.
- * Separate half-window drift checks reject a car being slowly repositioned. */
-#define CAL_GYRO_ABS_LIMIT (20.0f * 131.0f)
-#define CAL_GYRO_SD_LIMIT 2.0f /* deg/s */
-#define CAL_ACCEL_SD_LIMIT 0.03f /* g */
-#define CAL_ANGLE_SD_LIMIT 1.0f /* degrees */
-#define CAL_GYRO_DRIFT_LIMIT 1.0f /* deg/s, half-window means */
-#define CAL_ACCEL_DRIFT_LIMIT 0.025f /* g */
-#define CAL_ANGLE_DRIFT_LIMIT 0.5f /* degrees */
 /*
- * 校准统计数组的下标：0=加速度角，1/2/3=三轴角速度，4/5/6=三轴加速度。
- * 数组内单位分别是度、度/秒、g；cal_m2 保存离均差平方和，用于计算方差。
- * SD 检查抖动大小，DRIFT 比较前后半段均值，防止缓慢移动也被当成静止。
+ * 倾倒恢复连续稳定计数。
+ * 扶正后要连续40拍(200ms)都满足恢复条件才真正重启，这个计数器数到40就恢复
+ */
+static uint16_t tilt_resume_count;
+
+/*
+ * 存放某次的平均值数组，存放倾斜角某次的偏差平方和数组，存放一半时候的平均值数组
+ * 数组内单位分别是度、度/秒、g；用于计算方差。
+ * SD 检查抖动大小（角度，角速度，加速度），DRIFT 比较前后半段均值，防止缓慢移动也被当成静止。
  * cal_last_block 对应串口 LAST，记录最近一次校准被拒绝的原因。
  */
 static float cal_mean[7], cal_m2[7], cal_first_half[7];
@@ -94,9 +82,10 @@ static uint8_t calibration_gyro_plausible(void)
         && fabsf((float)raw->gz) < CAL_GYRO_ABS_LIMIT;
 }
 /*
+ * accel_angle为加速度计算出的角度
  * 每个有效样本调用一次。用 Welford 方法逐次更新均值和离均差平方和，
  * 不需要把 200 组样本全部存在 RAM。第 100 个样本时保存前半段均值。
- * 另外单独累加 X 角度和原始 gx，最终分别得到机械零点和陀螺仪零偏。
+ * 另外累加 X 角度和原始 gx，最终分别得到机械零点和陀螺仪零偏。
  */
 static void calibration_accumulate(float accel_angle)
 {
@@ -110,17 +99,18 @@ static void calibration_accumulate(float accel_angle)
             cal_m2[i] = 0.0f;
             cal_first_half[i] = values[i];
         } else {
-            float delta = values[i] - cal_mean[i];
-            cal_mean[i] += delta / calibration_count;
-            cal_m2[i] += delta * (values[i] - cal_mean[i]);
+            float delta = values[i] - cal_mean[i];                          //除第一轮开始values已经是最新值，cal_mean为上一轮values值
+            cal_mean[i] += delta / calibration_count;                       //前后两平均值
+            cal_m2[i] += delta * (values[i] - cal_mean[i]);                 //两个数的分散度累加
         }
-        if (calibration_count == CALIBRATION_SAMPLES / 2U)
+        if (calibration_count == CALIBRATION_SAMPLES / 2U)                  //计入前100次的平均值放到数组中
             cal_first_half[i] = cal_mean[i];
     }
     angle_sum += accel_angle;
     gyro_sum += raw->gx;
 }
 /*
+ * 求角度标准差差cal_sd_angle表示角度摆动幅度,后面同理
  * 收满 200 个样本后才判断整段是否稳定，小幅单点波动不会立刻清零。
  * 总体均值=(前半均值+后半均值)/2，所以两半均值之差=2*(总体均值-前半均值)。
  * 任一噪声或漂移指标超限就返回 0，并记录具体原因；合格返回 1。
@@ -129,8 +119,9 @@ static uint8_t calibration_window_stable(void)
 {
     float variance = cal_m2[0] / CALIBRATION_SAMPLES;
     cal_window_checked = 1U;
-    if (variance < 0.0f) variance = 0.0f;
+    if (variance < 0.0f) variance = 0.0f;                                   //方差小于0则为0
     cal_sd_angle = sqrtf(variance);
+    /*两半平均值之差*/
     cal_drift_angle = 2.0f * fabsf(cal_mean[0] - cal_first_half[0]);
     cal_sd_gyro = cal_sd_accel = cal_drift_gyro = cal_drift_accel = 0.0f;
     for (unsigned i = 1U; i < 7U; ++i) {
@@ -139,9 +130,11 @@ static uint8_t calibration_window_stable(void)
         float sd = sqrtf(variance_axis);
         float drift = 2.0f * fabsf(cal_mean[i] - cal_first_half[i]);
         if (i <= 3U) {
+            /*轮3次把xyz的偏差值对比，看谁最大，最后角速度取最大偏差值*/
             if (sd > cal_sd_gyro) cal_sd_gyro = sd;
             if (drift > cal_drift_gyro) cal_drift_gyro = drift;
         } else {
+            /*同样，后面3轮为加速度对比*/
             if (sd > cal_sd_accel) cal_sd_accel = sd;
             if (drift > cal_drift_accel) cal_drift_accel = drift;
         }
@@ -164,7 +157,8 @@ static void reset_controllers(void)
 {
     pid_balance.integral = pid_balance.output = 0.0f;
     pid_speed.integral = pid_speed.output = 0.0f;
-    PID_PositionReset();
+    pid_position.error = pid_position.integral = pid_position.output = 0.0f;
+    position_counts = position_speed_target = 0.0f;
     pid_turn.integral = pid_turn.output = 0.0f;
     balance_pwm = speed_filt = 0.0f;
 }
@@ -178,12 +172,12 @@ static void fault_stop(BalanceFault reason)
 {
     uint32_t saved = __get_PRIMASK();
     __disable_irq();
-    /* Do not overwrite an ISR timing fault with a recoverable tilt stop. */
+    /* 如果只是角度大了点，但现在本来就没在运行，那就别停了 */
     if (reason == FAULT_TILT && balance_state != BALANCE_RUNNING) {
         __set_PRIMASK(saved);
         return;
     }
-    /* Tilt alone may resume; sensor, hardware and timing faults stay latched. */
+    /* 倾斜角大于45度和运行生效时候才可以扶正自动复位 */
     tilt_resume_pending = (uint8_t)(reason == FAULT_TILT && balance_state == BALANCE_RUNNING);
     tilt_resume_count = 0U;
     boot_auto_start_pending = 0U;
