@@ -56,8 +56,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/user/motor.c
     Core/user/mpu6050.c
     Core/user/pid.c
-    Core/user/st7789.c
     Core/user/uart_cmd.c
+    Core/user/display_link.c
     Core/user/dmp_attitude.c
     Core/user/dmp_platform.c
     Core/user/inv_mpu.c
@@ -93,5 +93,5 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,-u,_printf_float")
 set_source_files_properties(
     Core/user/inv_mpu.c Core/user/inv_mpu_dmp_motion_driver.c
     Core/user/dmp_attitude.c Core/user/dmp_platform.c Core/user/mpu6050.c
-    Core/user/balance.c Core/user/uart_cmd.c Core/user/st7789.c
+    Core/user/balance.c Core/user/uart_cmd.c Core/user/display_link.c
     PROPERTIES COMPILE_OPTIONS "-Os")

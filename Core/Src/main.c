@@ -31,8 +31,8 @@
 #include <stdio.h>
 #include "balance.h"
 #include "uart_cmd.h"
+#include "display_link.h"
 #include "motor.h"
-#include "st7789.h"
 #include "dmp_platform.h"
 #include "pid.h"
 /* USER CODE END Includes */
@@ -113,7 +113,6 @@ int main(void)
   MX_USART2_UART_Init();
   MX_I2C1_Init();
   MX_I2C2_Init();
-  MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
   /* =====================	关 JTAG，释放 PB3/PB4 等引脚，留 SWD 调试用 ===================*/
   __HAL_AFIO_REMAP_SWJ_NOJTAG();
@@ -122,11 +121,11 @@ int main(void)
  * 校准ADC
  */
   if (UART_Start(&huart2) != HAL_OK) Error_Handler();
+  /* The display link is optional and must not stop the balance controller. */
+  (void)DisplayLink_Init(&huart1);
   if (HAL_ADCEx_Calibration_Start(&hadc1) != HAL_OK) Error_Handler();
   /* 防止读取DMP时候卡顿明显 */
-  ST7789_Init();
-  ST7789_Poll();
-  DMP_PlatformSetStartupPoll(ST7789_Poll);
+  /* Screen drawing now runs on the ESP32-S3. */
   UART_Printf("I2C MPU6050/MPU6500 v11 CAL-STATS AUTO-START TILT45 RECOVER200ms; SCL=PB10 SDA=PB11 addr=0x68\r\n");
   /*
    * Balance_Init 初始化控制器和硬件，并进入姿态校准阶段，尚不立即转动电机
@@ -138,9 +137,8 @@ int main(void)
   if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK) Error_Handler();
   UART_Printf("Balance 200Hz; PWM 20kHz; PB1 active-low press toggles START/STOP\r\n");
   UART_Printf("Hold upright and still; auto-start after calibration; PB1 toggles STOP/START\r\n");
-  uint32_t last_lcd_snapshot = HAL_GetTick() - 200U;
-  uint8_t last_lcd_status = 255U;
-  UART_Printf("I2C1 PB8/PB9 100k; I2C2 MPU PB10/PB11 400k; LCD SPI1 PB3/PB5 DMA\r\n");
+  uint32_t last_display_link = HAL_GetTick() - 200U;
+  UART_Printf("I2C1 PB8/PB9 100k; I2C2 MPU PB10/PB11 400k; display USART1 PA9/PA10\r\n");
   uint32_t last_print = HAL_GetTick();                                              //VOFA 上位机绘图数据的时间标志
   uint32_t last_led = HAL_GetTick();                                                //PC13 状态灯翻转的时间标志
   uint32_t last_diag_print = HAL_GetTick();                                         //打完整诊断信息的时间标志
@@ -189,28 +187,21 @@ while (1)
         last_led = now;
         HAL_GPIO_TogglePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin);
     }
-    /* 约每 200ms 抓取一次LCD画面，200ms即不卡顿也占用不高 */
-    if ((uint32_t)(now - last_lcd_snapshot) >= 200U) {
-        ST7789_Status display;
-        last_lcd_snapshot = now;
-        display.state = (uint8_t)balance_state;                                   // 当前平衡车状态：0=校准中，1=就绪，2=运行，3=故障停机
-        display.fault = balance_fault;                                            // 故障码：0=无故障，1=IMU传感器故障，2=倾倒停机，3=硬件故障
-        display.angle = angle;                                                    // 当前车身倾角（DMP四元数滤波后，单位度）
-        display.gyro = raw_gx;                                                    // 当前X轴角速度（扣完零偏，单位度/秒）
-        display.encoder_a = speedA;                                               // 左轮编码器速度（5ms内计数增量）
-        display.encoder_b = speedB;                                               // 右轮编码器速度（5ms内计数增量）
-        display.pwm_a = __HAL_TIM_GET_COMPARE(&htim4, TIM_CHANNEL_1);  // 左轮电机实际PWM占空比（直接读定时器CCR寄存器）
-        display.pwm_b = __HAL_TIM_GET_COMPARE(&htim4, TIM_CHANNEL_2);  // 右轮电机实际PWM占空比
-        display.stby = (HAL_GPIO_ReadPin(STBY_PORT, STBY_PIN) == GPIO_PIN_SET);   // 电机驱动使能状态：1=开，0=关
-        display.key = (HAL_GPIO_ReadPin(USER_KEY_GPIO_Port, USER_KEY_Pin) == GPIO_PIN_RESET);  // PB1按键状态：1=按下，0=松开
-
-        ST7789_SetStatus(&display);
-    }
-    ST7789_Poll();
-    /*将上一次状态替换成这一次状态*/
-    if (ST7789_GetStatus() != last_lcd_status) {
-        last_lcd_status = ST7789_GetStatus();
-        UART_Printf("LCD SPI/DMA status=%u (0=init 1=TX-ready 2=TX-failed)\r\n", (unsigned)last_lcd_status);
+    /* Latest status snapshot, nonblocking USART1 transmission every 200 ms. */
+    if ((uint32_t)(now - last_display_link) >= 200U) {
+        last_display_link = now;
+        DisplayStatus d;
+        d.state = (uint8_t)balance_state;
+        d.fault = balance_fault;
+        d.angle = angle;
+        d.gyro = raw_gx;
+        d.encoder_a = speedA;
+        d.encoder_b = speedB;
+        d.pwm_a = __HAL_TIM_GET_COMPARE(&htim4, TIM_CHANNEL_1);
+        d.pwm_b = __HAL_TIM_GET_COMPARE(&htim4, TIM_CHANNEL_2);
+        d.stby = HAL_GPIO_ReadPin(STBY_PORT, STBY_PIN) == GPIO_PIN_SET;
+        d.key = HAL_GPIO_ReadPin(USER_KEY_GPIO_Port, USER_KEY_Pin) == GPIO_PIN_RESET;
+        (void)DisplayLink_SendStatus(&d);
     }
     /* USER CODE END WHILE */
 

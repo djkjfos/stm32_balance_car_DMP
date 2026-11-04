@@ -4,6 +4,7 @@
  * 这样等待串口传输的时间不会逐字节阻塞 5ms 控制任务；格式化本身仍会消耗 CPU。
  */
 #include "uart_cmd.h"
+#include "display_link.h"
 #include "balance.h"
 #include "pid.h"
 #include "motor.h"
@@ -118,6 +119,7 @@ void UART_Printf(const char *format, ...)
  */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *uart)
 {
+    if (uart == &huart1) { DisplayLink_OnTxComplete(uart); return; }
     if (uart == command_uart) { tx_busy = 0U; tx_kick(); }
 }
 
@@ -127,6 +129,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *uart)
  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *uart)
 {
+    if (uart == &huart1) { DisplayLink_OnRxComplete(uart); return; }
     uint16_t next;
     if (uart != command_uart) return;
     next = (uint16_t)((rx_head + 1U) % RX_SIZE);
@@ -140,6 +143,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *uart)
  */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart)
 {
+    if (uart == &huart1) { DisplayLink_OnError(uart); return; }
     if (uart != command_uart) return;
     rx_overflow = 1U;
     (void)HAL_UART_Receive_IT(uart, &rx_byte, 1U);
