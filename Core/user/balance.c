@@ -23,7 +23,7 @@
  */
 volatile BalanceState balance_state = BALANCE_CALIBRATING;                          //当前车体状态：校准中/就绪/运行/故障
 volatile BalanceFault balance_fault = FAULT_NONE;                                   //当前故障原因：无/IMU错误/倾倒/节拍超时/硬件错误。只有状态是FAULT时才有意义
-static volatile uint8_t pending_ticks;                                              //TIM1中断每5ms标志位
+static volatile uint8_t pending_ticks;                                              //TIM1中断每5ms标志位，一次中断++
 static uint16_t calibration_count;                                                  //校准阶段已经采了多少个样本。采满200个就判断稳定性
 static float angle_sum, gyro_sum, angle_zero, gyro_zero;
 static uint32_t last_sample_ms;                                                     //最后一次成功读到IMU的时间戳(ms)
@@ -50,20 +50,37 @@ static uint16_t tilt_resume_count;
 static float cal_mean[7], cal_m2[7], cal_first_half[7];
 static float cal_sd_angle, cal_sd_gyro, cal_sd_accel;
 static float cal_drift_angle, cal_drift_gyro, cal_drift_accel;
+/* 标记：本次校准有没有收满过一次完整200样本窗口？
+ * 串口打印 CAL WINDOW 时才用，没算过就不打印，避免输出脏数据
+ */
 static uint8_t cal_window_checked;
+/* 最近一次校准被拒绝的原因字符串，比如 "ANGLE_NOISE"/"WHEEL_MOVED"/"GYRO_DRIFT"
+ * 串口输入 CAL LAST 就能看到，用来定位"为什么车一直校准不成功"
+ */
 static const char *cal_last_block = "NONE";
+/* 校准窗口被作废重收的累计次数。
+ * 如果这个数很大，说明你上电后一直在动车/桌子在震/手在抖
+ */
 static uint32_t cal_restarts;
 #define KEY_DEBOUNCE_MS 30U
+/* key_raw_pressed：按键当前读到的原始电平(0=按下接地)
+ * key_stable_pressed：消抖后稳定的电平，持续30ms没变才更新它
+ */
 static uint8_t key_raw_pressed, key_stable_pressed;
+/* 记录原始电平最后一次变化的时刻(ms)，用来算"已经持续了多久没变" */
 static uint32_t key_changed_ms;
 /*
- * 上电自动启动是一次性请求；手动停止或显式 CAL 会取消它。
+ * 上电自动启动是一次性请求；手动停止或显式 CAL 会取消它。只有初始化成功后才置1，其他时间都是拉低了
  * 它与 tilt_resume_pending 分开：后者只用于“原本正在运行，后来因倾倒停机”的恢复。
  */
 static volatile uint8_t boot_auto_start_pending;
 
 /*
- * 丢弃当前校准窗口。统计数组会在下一个窗口的第一个样本处重新赋值。
+ * 丢弃当前校准窗口，重新开始采。
+ * 什么时候调它：
+ *   - 校准中发现动了（角度超15°/陀螺超20°/轮子转了）
+ *   - 200个采完但统计不合格（SD/DRIFT超限）
+ *   - 手动发CAL命令重新校准
  * 这里不清除最近一次失败的诊断信息，便于在串口定位反复校准的原因。
  */
 static void reset_calibration_window(void)
@@ -190,6 +207,7 @@ static void fault_stop(BalanceFault reason)
 }
 
 /*
+ * 上电判断初始化函数
  * 显式 CAL 或上电初始化都会经过这里：先停电机，再初始化 IMU，开始收集样本。
  * 本函数只“开始校准”，不会阻塞等待收满 200 个样本；采样由 Balance_Poll 逐次完成。
  * 显式 CAL 不自动启动；Balance_Init 会在它成功后单独设置上电自动启动请求。
@@ -253,7 +271,6 @@ HAL_StatusTypeDef Balance_Init(void)
     return status;
 }
 
-/* TIM1 only posts a tick. A blocked main loop must not leave STBY asserted. */
 /*
  * 由 TIM1 的 HAL 回调调用，运行在中断里。只提交节拍，不在这里读 I2C 或打印。
  * 主循环若积压两次未处理节拍，立即关闭驱动并记录超时故障。
@@ -270,10 +287,10 @@ void Balance_OnTickISR(void)
     }
 }
 
+/*enable 0 and 1 is stop and start. from_key to 0 and 1 is uart command or key command */
 /*
  * 最终启停判定：enable=0 停止并取消自动启动/恢复；enable=1 请求启用。
  * 启用要求 READY、姿态接近零点、传感器样本不超过 20ms。
- * from_key=1 表示由实体按键启动：此时按键本来就是低电平，应允许该次按下启动；
  * 串口或自动启动则要求实体键松开。所有启用仍须通过姿态和数据时效检查。
  */
 static uint8_t arm_output(uint8_t enable, uint8_t from_key)
@@ -289,11 +306,13 @@ static uint8_t arm_output(uint8_t enable, uint8_t from_key)
             balance_state = BALANCE_READY;
             balance_fault = FAULT_NONE;
         }
+        /* 按键按下或者判定不使能，再正常状态下停止运行且清除积分 */
         if (balance_state == BALANCE_RUNNING) balance_state = BALANCE_READY;
         reset_controllers();
         target_speed = target_turn = 0.0f;
         __set_PRIMASK(saved); return 1U;
     }
+    /* 没有就绪，数据超20ms没关系，零角偏差10度，按键按着或者软件标志位没启动都不算启动成功，否则就启动成功退出 */
     if (balance_state != BALANCE_READY || HAL_GetTick() - last_sample_ms > 20U
         || fabsf(angle - angle_zero) > 10.0f
         || (!from_key && HAL_GPIO_ReadPin(USER_KEY_GPIO_Port, USER_KEY_Pin) == GPIO_PIN_RESET)) {
@@ -308,25 +327,21 @@ static uint8_t arm_output(uint8_t enable, uint8_t from_key)
     __set_PRIMASK(saved); return 1U;
 }
 
-/* Keep the serial debug interface; a held physical key blocks remote enabling. */
-/*
- * 提供给串口模块的启停接口。ARM 1 表示请求闭环运行，不是强制输出固定 PWM。
- * 姿态接近零点时，RUNNING 状态下的实时 PWM 也可能等于 0。
- */
+/* ARM for enable is only uart command  */
 uint8_t Balance_Arm(uint8_t enable)
 {
     return arm_output(enable, 0U);
 }
 
-/* Active-low PB1: one debounced press toggles, release only rearms detection.
- * Polling uses the existing millisecond clock and never blocks control sampling. */
 /*
+ * 不堵塞，用轮询
  * PB1 上拉：松开=1，按下接地=0。电平变化后持续 30ms 才认定按键状态改变。
  * 只有“松开到按下”的事件切换启停；释放只为下次按下做准备，长按不会反复切换。
  * 校准中按下取消上电自动启动；倾倒等待中按下取消自动恢复，保持手动停止。
  */
 void Balance_KeyPoll(void)
 {
+    /* 按下pressed为1 */
     uint8_t pressed = (uint8_t)
         (HAL_GPIO_ReadPin(USER_KEY_GPIO_Port, USER_KEY_Pin) == GPIO_PIN_RESET);
     uint32_t now = HAL_GetTick();
@@ -334,10 +349,20 @@ void Balance_KeyPoll(void)
         key_raw_pressed = pressed;
         key_changed_ms = now;
     }
+    /* 两个条件任一满足就返回：
+     *   ① 距上次变化不到30ms → 还在消抖期，不认
+     *   ② 新电平和稳定电平一样 → 没变化，不认
+     */
     if ((uint32_t)(now - key_changed_ms) < KEY_DEBOUNCE_MS
         || pressed == key_stable_pressed) return;
+    /* 超30ms，读取完成更新key状态 */
     key_stable_pressed = pressed;
     if (!pressed) return;
+    /* 情况1：校准中按下 + 上电自启还在等待 → 取消自动启动
+     * 情况2：运行中按下，或倾倒恢复等待中按下 → 停止
+     * 情况3：就绪状态按下 → 请求启动
+     * 情况4：其他状态按下 → 启动被拒，打印原因和诊断
+     */
     if (balance_state == BALANCE_CALIBRATING && boot_auto_start_pending) {
         boot_auto_start_pending = 0U;
         UART_Printf("KEY STOP: boot auto-start canceled; press PB1 after READY to start\r\n");
@@ -512,11 +537,6 @@ void Balance_Poll(void)
     if (!isfinite(balance_pwm) || !isfinite(turn)) { fault_stop(FAULT_IMU); return; }
     /* The timer ISR may have faulted during the read/calculation. Never re-enable here. */
     if (balance_state == BALANCE_RUNNING) {
-//		if(turn > 0.0f){
-//		turn += 82.0;
-//		}else{
-//		turn -= 82;
-//	}
         MotorA_SetSpeed(balance_pwm + turn);
         MotorB_SetSpeed(balance_pwm - turn);
     }
