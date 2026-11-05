@@ -378,7 +378,13 @@ void Balance_KeyPoll(void)
     }
 }
 
+float get_value(void)
+{
+    return gyro_zero;
+}
+
 /*
+ * 开闭中断俩读取pending_ticks看是否为超出中断次数（1），超出即超时，和MPU是否出错
  * 主循环反复调用，但只有收到 TIM1 节拍时才执行一次采样/控制。
  * 建议按下列顺序阅读：取节拍 -> 读 IMU/编码器 -> 校准分支 -> 倾倒恢复分支
  * -> 运行状态检查 -> 45 度停机 -> 速度 PI -> 直立 PD -> 转向 P -> 两路电机输出。
@@ -388,7 +394,7 @@ void Balance_Poll(void)
     uint8_t due;
     uint32_t saved = __get_PRIMASK();
     __disable_irq(); due = pending_ticks; pending_ticks = 0U; __set_PRIMASK(saved);
-    /* Keep observing tilt while outputs are off so upright recovery is possible. */
+    /* 超时或者出故障直接退出，读取MPU数据失败打印并退出. */
     if (!due || (balance_state == BALANCE_FAULT && balance_fault != FAULT_TILT)) return;
     if (due > 1U && balance_state == BALANCE_RUNNING) { fault_stop(FAULT_OVERRUN); return; }
     last_read_status = MPU6050_ReadAll(&hi2c2, raw);
@@ -411,7 +417,7 @@ void Balance_Poll(void)
     raw_gx = MPU6050_GetGyroX(raw, gyro_zero);
     /*
      * 上电校准阶段电机始终关闭。先检查角度、原始角速度、重力和轮动，
-     * 再累积 200 个样本并检验统计稳定性。gravity_sq 是加速度模长的平方，单位 g²。
+     * 再累积 200 个样本并检验统计稳定性。gravity_sq 是加速度模长的平方，单位 g²，用于与g平方对比。
      * 校准不合格会重新收集；不会因为等待时间到了就绕过条件强行启动。
      */
     if (balance_state == BALANCE_CALIBRATING) {
@@ -419,20 +425,24 @@ void Balance_Poll(void)
         float gravity_sq = ((float)raw->ax * raw->ax + (float)raw->ay * raw->ay
                           + (float)raw->az * raw->az) / (16384.0f * 16384.0f);
         angle = accel_angle;
-        /* Bad orientation, motion or sampling gaps still invalidate the window. */
+        /* 节拍数不是 1和刚才清零后，中断又来新节拍了
+         * 角度限制，15度
+         * 角速度限制
+         */
         const char *block = NULL;
         if (due != 1U || pending_ticks != 0U) block = "SAMPLE_GAP";
         else if (fabsf(accel_angle) >= 15.0f) block = "ANGLE_RANGE";
         else if (!calibration_gyro_plausible()) block = "GYRO_RANGE";
-        else if (gravity_sq <= 0.64f || gravity_sq >= 1.44f) block = "GRAVITY_RANGE";
+        else if (gravity_sq <= 0.64f || gravity_sq >= 1.44f) block = "GRAVITY_RANGE";               //对标g的0.8到1.2之间，在此之间准备成功
         else if (speedA != 0.0f || speedB != 0.0f) block = "WHEEL_MOVED";
+        /* 读取到MPU读数据出问题，丢弃当前校准窗口，重新开始采 */
         if (block != NULL) {
             cal_last_block = block;
             if (calibration_count != 0U) ++cal_restarts;
             reset_calibration_window();
             return;
         }
-        calibration_accumulate(accel_angle);
+        calibration_accumulate(accel_angle);                                                        //角度，角速度求和
         if (calibration_count >= CALIBRATION_SAMPLES) {
             if (!calibration_window_stable()) {
                 ++cal_restarts;
@@ -448,7 +458,7 @@ void Balance_Poll(void)
             gyro_zero = gyro_sum / CALIBRATION_SAMPLES;
             MPU6050_ResetAngle(angle_zero);
             angle = angle_zero;
-            raw_gx = MPU6050_GetGyroX(raw, gyro_zero);
+            raw_gx = MPU6050_GetGyroX(raw, get_value());
             balance_state = BALANCE_READY;
             UART_Printf("CALIBRATED angle_zero=%.2f gyro_zero=%.1f counts\r\n", angle_zero, gyro_zero);
             /* Consume the boot request exactly once; STOP or fault recovery never re-arms it. */
@@ -473,8 +483,7 @@ void Balance_Poll(void)
         float accel_angle = MPU6050_AccelAngleX(raw);
         float gravity_sq = ((float)raw->ax * raw->ax + (float)raw->ay * raw->ay
                           + (float)raw->az * raw->az) / (16384.0f * 16384.0f);
-        /* Hysteresis plus consecutive fresh samples avoids restart at the fall boundary.
-         * Check raw acceleration too, so filter lag cannot enable a still-fallen car. */
+        /* 摔倒后恢复条件，所以起始条件都满足才下一步 */
         if (!tilt_resume_pending || due != 1U || pending_ticks != 0U
             || fabsf(angle) > TILT_RESUME_DEG || fabsf(angle - angle_zero) > TILT_RESUME_DEG
             || fabsf(accel_angle) > TILT_RESUME_DEG || fabsf(accel_angle - angle_zero) > TILT_RESUME_DEG
@@ -533,17 +542,16 @@ void Balance_Poll(void)
      * 这样共同分量用于前后平衡，差动分量用于两轮转向，最终仍由 motor.c 分别限幅。
      */
     float turn = pid_p(&pid_turn, speedA - speedB, target_turn);
-
+    /* isfinite判断值是否是无穷大，一般都是报错的时候出现 */
     if (!isfinite(balance_pwm) || !isfinite(turn)) { fault_stop(FAULT_IMU); return; }
-    /* The timer ISR may have faulted during the read/calculation. Never re-enable here. */
+
     if (balance_state == BALANCE_RUNNING) {
         MotorA_SetSpeed(balance_pwm + turn);
         MotorB_SetSpeed(balance_pwm - turn);
     }
 }
 
-/* Observe raw counters without consuming encoder deltas or changing motor state.
- * Called from the main loop, never from a timer interrupt. */
+/* 把所有状态变量通过串口打印出来，方便你调试时看车现在什么情况 */
 /*
  * 串口诊断在主循环中执行。DBG 看状态/样本，CTRL 看启动意图和倾角偏差，
  * CAL 的 LAST 看最近校准失败条件，CAL WINDOW 看完整窗口的统计量。

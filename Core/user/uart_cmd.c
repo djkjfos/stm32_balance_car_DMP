@@ -16,7 +16,6 @@
 #include <ctype.h>
 
 /*
- * 这些变量供 balance.c 更新、main.c 输出到上位机：
  * angle=滤波角度（校准时为重力角），raw_gx=已扣零偏的角速度，单位度和度/秒。
  * speedA/B=两轮本周期增量，speed_avg=平均值，speed_filt=平均值低通滤波结果。
  * balance_pwm=直立环控制量；gyro_filt 当前只保留变量，没有参与现行滤波或控制。

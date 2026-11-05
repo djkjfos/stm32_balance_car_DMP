@@ -1,11 +1,11 @@
 #include "balance_link.h"
 #include "balance_protocol.h"
-static HardwareSerial BalanceSerial(1);
-static BalanceFrameParser parser;
-static bool online=false;
-static uint32_t last_frame=0;
+static HardwareSerial BalanceSerial(1);  // ESP32的UART1串口对象
+static BalanceFrameParser parser;         // 帧解析器实例
+static bool online = false;               // STM32在线状态标记
+static uint32_t last_frame = 0;           // 最后一帧收到的时间戳
 void BalanceLink_Init() {
-  BalanceSerial.begin(BALANCE_UART_BAUD, SERIAL_8N1, BALANCE_UART_RX, BALANCE_UART_TX);
+  BalanceSerial.begin(BALANCE_UART_BAUD, SERIAL_8N1, BALANCE_UART_RX, BALANCE_UART_TX);     // 启动串口
   ST7789_SetLinkOnline(false);
 }
 void BalanceLink_Poll() {
