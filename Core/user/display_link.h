@@ -17,6 +17,8 @@ HAL_StatusTypeDef DisplayLink_SendStatus(const DisplayStatus *s);
 uint8_t DisplayLink_ReadByte(uint8_t *out);
 // Sticky error/overflow indication. On non-zero discard the current input frame.
 uint8_t DisplayLink_TakeRxError(void);
+// Consume incoming control frames. Returns 1 only for a complete valid pair.
+uint8_t DisplayLink_PollCommand(float *speed, float *turn);
 // These are dispatch targets, NOT HAL callbacks. Call from the existing HAL callbacks.
 void DisplayLink_OnTxComplete(UART_HandleTypeDef *uart);
 void DisplayLink_OnRxComplete(UART_HandleTypeDef *uart);

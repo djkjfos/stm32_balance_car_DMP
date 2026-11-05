@@ -1,5 +1,6 @@
 #include "st7789.h"
 #include "st7789_font.h"
+#include "image_rgb565.h"
 #include <Arduino.h>
 #include <SPI.h>
 #include <stdio.h>
@@ -7,7 +8,7 @@
 #define STRIP_ROWS 4U
 #define FRAME_INTERVAL_MS 200U
 #define TEXT_ROWS 10U
-#define BACKGROUND_COLOR 0x0000U
+#define BACKGROUND_COLOR 0xFFFFU
 struct InitCommand { uint8_t command, count, data[14]; uint16_t delay_ms; };
 static const InitCommand init_commands[] = {
  {0x11,0,{0},120}, {0x36,1,{ST7789_MADCTL},0}, {0x3A,1,{0x05},0},
@@ -19,7 +20,7 @@ static const InitCommand init_commands[] = {
  {0x21,0,{0},0}, {0x29,0,{0},20}
 };
 static SPIClass displaySPI(FSPI);
-static SPISettings settings(10000000, MSBFIRST, SPI_MODE3);
+static SPISettings settings(10000000, MSBFIRST, SPI_MODE0);
 static uint8_t pixels[ST7789_WIDTH * STRIP_ROWS * 2U];
 static ST7789_Status latest{}, snapshot{};
 static bool link_online=false, frame_online=false;
@@ -37,15 +38,17 @@ static void push_strip(uint16_t y) {
  uint16_t x0=ST7789_X_OFFSET, x1=x0+ST7789_WIDTH-1, y0=y+ST7789_Y_OFFSET, y1=y0+STRIP_ROWS-1;
  uint8_t col[]={uint8_t(x0>>8),uint8_t(x0),uint8_t(x1>>8),uint8_t(x1)};
  uint8_t row[]={uint8_t(y0>>8),uint8_t(y0),uint8_t(y1>>8),uint8_t(y1)};
- cmd(0x2A,col,4); cmd(0x2B,row,4); cmd(0x2C);
- displaySPI.beginTransaction(settings); digitalWrite(ST7789_PIN_CS,LOW); digitalWrite(ST7789_PIN_DC,HIGH);
+ cmd(0x2A,col,4); cmd(0x2B,row,4);
+ displaySPI.beginTransaction(settings); digitalWrite(ST7789_PIN_CS,LOW);
+ digitalWrite(ST7789_PIN_DC,LOW); displaySPI.transfer(0x2C);
+ digitalWrite(ST7789_PIN_DC,HIGH);
  displaySPI.writeBytes(pixels,sizeof(pixels));
  digitalWrite(ST7789_PIN_CS,HIGH); displaySPI.endTransaction();
 }
 void ST7789_Init(void) {
  pinMode(ST7789_PIN_CS,OUTPUT); pinMode(ST7789_PIN_DC,OUTPUT); pinMode(ST7789_PIN_RST,OUTPUT);
  if(ST7789_PIN_BL>=0) { pinMode(ST7789_PIN_BL,OUTPUT); digitalWrite(ST7789_PIN_BL,HIGH); }
- digitalWrite(ST7789_PIN_CS,HIGH); displaySPI.begin(ST7789_PIN_SCK,-1,ST7789_PIN_MOSI,ST7789_PIN_CS);
+ digitalWrite(ST7789_PIN_CS,HIGH); displaySPI.begin(ST7789_PIN_SCK,-1,ST7789_PIN_MOSI,-1);
  lcd_status=0; init_phase=0; init_index=0; clear_y=0; drawing=0; latest={};
  digitalWrite(ST7789_PIN_RST,LOW); wait_until=millis()+20U;
 }
@@ -71,26 +74,41 @@ static void format_line(void)
     default: snprintf(text, sizeof(text), "STBY %u KEY %u", (unsigned)snapshot.stby, (unsigned)snapshot.key); break;
     }
 }
-static void render_background_strip(void)
+static uint16_t background_pixel(uint16_t x, uint16_t y) {
+    if (x >= IMAGE_WIDTH || y >= IMAGE_HEIGHT)
+        return BACKGROUND_COLOR;
+    return image_rgb565[(uint32_t)y * IMAGE_WIDTH + x];
+}
+static void render_background_strip(uint16_t top)
 {
-    for (uint16_t i = 0; i < sizeof(pixels); i += 2U) {
-        pixels[i] = (uint8_t)(BACKGROUND_COLOR >> 8);
-        pixels[i + 1U] = (uint8_t)BACKGROUND_COLOR;
+    for (uint16_t y=0; y<STRIP_ROWS; ++y) {
+        for (uint16_t x=0; x<ST7789_WIDTH; ++x) {
+            uint16_t color=background_pixel(x, top+y);
+            uint16_t i=(uint16_t)((y*ST7789_WIDTH+x)*2U);
+            pixels[i]=(uint8_t)(color>>8); pixels[i+1U]=(uint8_t)color;
+        }
     }
+}
+static bool text_pixel(int x, int y, size_t length) {
+    if (x<0 || y<0 || x>=(int)ST7789_WIDTH || y>=16) return false;
+    size_t character=(size_t)x/12U;
+    if (character>=length) return false;
+    uint8_t c=(uint8_t)text[character];
+    return c>=32U && c<=126U &&
+        (st7789_font[c-32U][((unsigned)x%12U)/2U] & (1U<<((unsigned)y/2U)));
 }
 static void render_strip(void)
 {
     size_t length = strlen(text);
     for (uint16_t y = 0; y < STRIP_ROWS; ++y) {
-        uint8_t bit = (uint8_t)((text_y + y) / 2U);
         for (uint16_t x = 0; x < ST7789_WIDTH; ++x) {
-            uint16_t color = BACKGROUND_COLOR;
-            size_t character = x / 12U;
-            if (character < length) {
-                uint8_t c = (uint8_t)text[character];
-                if (c >= 32U && c <= 126U && (st7789_font[c - 32U][(x % 12U) / 2U] & (1U << bit)))
-                    color = foreground;
-            }
+            int ty=(int)text_y+y;
+            uint16_t color=background_pixel(x,(uint16_t)(8U+text_row*22U+ty));
+            bool glyph=text_pixel(x,ty,length);
+            bool outline=text_pixel((int)x-1,ty,length) || text_pixel((int)x+1,ty,length)
+                || text_pixel(x,ty-1,length) || text_pixel(x,ty+1,length);
+            if (outline) color=0xFFFFU;
+            if (glyph) color=0x07E0U;
             uint16_t index = (uint16_t)((y * ST7789_WIDTH + x) * 2U);
             pixels[index] = (uint8_t)(color >> 8); pixels[index + 1U] = (uint8_t)color;
         }
@@ -104,10 +122,10 @@ void ST7789_Poll(void) {
   if(init_index<sizeof(init_commands)/sizeof(init_commands[0])) {
    const InitCommand &c=init_commands[init_index++]; cmd(c.command,c.data,c.count); wait_until=now+c.delay_ms; return;
   }
-  init_phase=2; render_background_strip(); return;
+  init_phase=2; return;
  }
  if(init_phase==2) {
-  push_strip(clear_y); clear_y+=STRIP_ROWS;
+  render_background_strip(clear_y); push_strip(clear_y); clear_y+=STRIP_ROWS;
   if(clear_y>=ST7789_HEIGHT) { init_phase=3; lcd_status=1; frame_ms=now-FRAME_INTERVAL_MS; }
   return;
  }

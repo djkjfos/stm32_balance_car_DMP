@@ -1,11 +1,11 @@
 #pragma once
 #include <stdint.h>
 // Candidate pins, change to match your ESP32-S3 board and wiring.
-#define ST7789_PIN_SCK 7
-#define ST7789_PIN_MOSI 6
+#define ST7789_PIN_SCK 4
+#define ST7789_PIN_MOSI 5
 #define ST7789_PIN_CS 15
-#define ST7789_PIN_DC 5
-#define ST7789_PIN_RST 8
+#define ST7789_PIN_DC 7
+#define ST7789_PIN_RST 6
 #define ST7789_PIN_BL (-1) // -1 means backlight wired separately; verify your module
 #define ST7789_WIDTH 240U
 #define ST7789_HEIGHT 240U

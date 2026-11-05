@@ -83,3 +83,38 @@ uint8_t DisplayLink_TakeRxError(void) {
     if(e) rx_tail=rx_head;
     __set_PRIMASK(mask); return e;
 }
+
+// Control frame: 5A A5, version 01, type 02, two little-endian signed
+// hundredths (speed, turn), CRC-16/CCITT-FALSE over bytes 2..7, LE.
+uint8_t DisplayLink_PollCommand(float *speed, float *turn) {
+    static uint8_t frame[10], used;
+    uint8_t byte, valid=0U;
+    if (!speed || !turn) return 0U;
+    if (DisplayLink_TakeRxError()) used=0U;
+    while (DisplayLink_ReadByte(&byte)) {
+        if (used==0U && byte!=0x5AU) continue;
+        if (used==1U && byte!=0xA5U) { used=(byte==0x5AU)?1U:0U; continue; }
+        frame[used++]=byte;
+        if (used==sizeof(frame)) {
+            uint8_t frame_valid=0U;
+            uint16_t crc=(uint16_t)(frame[8] | ((uint16_t)frame[9]<<8));
+            if (frame[2]==1U && frame[3]==2U && crc16(&frame[2],6U)==crc) {
+                uint16_t a=(uint16_t)(frame[4] | ((uint16_t)frame[5]<<8));
+                uint16_t b=(uint16_t)(frame[6] | ((uint16_t)frame[7]<<8));
+                int32_t sa=a<=32767U ? (int32_t)a : (int32_t)a-65536;
+                int32_t sb=b<=32767U ? (int32_t)b : (int32_t)b-65536;
+                *speed=(float)sa/100.0f; *turn=(float)sb/100.0f;
+                valid=frame_valid=1U;
+            }
+            // Recover a potential header already present in a damaged frame.
+            uint8_t start=1U;
+            while (start<9U && !(frame[start]==0x5AU && frame[start+1U]==0xA5U)) ++start;
+            if (!frame_valid && start<9U) {
+                used=(uint8_t)(10U-start);
+                for (uint8_t i=0U; i<used; ++i) frame[i]=frame[start+i];
+            } else if (!frame_valid && frame[9]==0x5AU) { frame[0]=0x5AU; used=1U; }
+            else used=0U;
+        }
+    }
+    return valid;
+}

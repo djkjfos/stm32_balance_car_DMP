@@ -138,6 +138,8 @@ int main(void)
   UART_Printf("Balance 200Hz; PWM 20kHz; PB1 active-low press toggles START/STOP\r\n");
   UART_Printf("Hold upright and still; auto-start after calibration; PB1 toggles STOP/START\r\n");
   uint32_t last_display_link = HAL_GetTick() - 200U;
+  uint32_t last_remote_command = 0U;
+  uint8_t remote_active = 0U;
   UART_Printf("I2C1 PB8/PB9 100k; I2C2 MPU PB10/PB11 400k; display USART1 PA9/PA10\r\n");
   uint32_t last_print = HAL_GetTick();                                              //VOFA 上位机绘图数据的时间标志
   uint32_t last_led = HAL_GetTick();                                                //PC13 状态灯翻转的时间标志
@@ -156,6 +158,19 @@ while (1)
     Balance_KeyPoll();
     UART_Poll();
     uint32_t now = HAL_GetTick();
+    float remote_speed, remote_turn;
+    if (DisplayLink_PollCommand(&remote_speed, &remote_turn) && balance_state == BALANCE_RUNNING) {
+        target_speed = remote_speed;
+        target_turn = remote_turn;
+        last_remote_command = now;
+        remote_active = 1U;
+    }
+    if (remote_active && (balance_state != BALANCE_RUNNING ||
+        (uint32_t)(now - last_remote_command) >= 500U)) {
+        target_speed = 0.0f;
+        target_turn = 0.0f;
+        remote_active = 0U;
+    }
     /*
      * 基础信息如果出故障就5s打印一次，没有就1s打印一次，防止数据打印太多，波特率太低卡死
      * 100ms发一次数据，但是在报错情况下不发送数据
