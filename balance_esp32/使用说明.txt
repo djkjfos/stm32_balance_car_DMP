@@ -2,7 +2,7 @@ ESP32-S3 平衡车屏幕与 UART 状态接收
 
 打开 balance_esp32.ino；Arduino IDE 开发板选择 ESP32S3 Dev Module。
 串口：ESP32 GPIO16(RX) <- STM32 PA9(TX)，ESP32 GPIO17(TX) -> STM32 PA10(RX)，共地，115200 8N1。16/17 为候选值，部分 ESP32-S3 板卡内存或外设会占用，连接前需确认，修改 balance_link.h。
-屏幕：240x240 ST7789；SCL/SCK 接 GPIO4，SDA/MOSI 接 GPIO5，RES 接 GPIO6，DC 接 GPIO7，CS 接 GPIO15。屏幕 GND 共地；VCC 和 BLK 根据模块要求供电。BL=-1 表示不使用 GPIO 控制背光。ESP32 硬件 SPI 使用模式 0、10 MHz，手动控制 CS；10 MHz 尚需实机验证。
+屏幕：240x240 ST7789；SCL/SCK 接 GPIO4，SDA/MOSI 接 GPIO5，RES 接 GPIO6，DC 接 GPIO7，CS 接 GPIO15。屏幕 GND 共地；VCC 和 BLK 根据模块要求供电。BL=-1 表示不使用 GPIO 控制背光。ESP32 硬件 SPI 使用模式 0、40 MHz，手动控制 CS；40 MHz 需实机验证，花屏时可降为 20 MHz 或 10 MHz。
 STM32 每 200 ms 发送一帧，ESP32 验证帧头、版本、长度和 CRC，更新状态；1 秒没有有效帧时页面显示 LINK DISCONNECTED 并清空旧数值。
 STM32 状态帧固定 32 字节 A5 5A，版本 01，载荷长度 26，内容与 STM32 工程 README_UART1_DISPLAY.txt 相同，CRC16 CCITT-FALSE。
 ESP32 到 STM32：调用 BalanceLink_SendTargets(speed, turn) 成对发送目标；每个值范围 -327.68 到 327.67，精度 0.01，非百分比。返回 true 仅表示交给 ESP32 串口，不代表 STM32 已执行。程序不会自动调用该函数；外部数据接入后由应用定时调用。
@@ -12,3 +12,5 @@ ESP32 到 STM32：调用 BalanceLink_SendTargets(speed, turn) 成对发送目标
 
 目标命令：ESP32 GPIO17 TX -> STM32 PA10 RX，GND 共地；每 100~200 ms 更新，STM32 超过 500 ms 未收到有效目标帧后将该远程目标清零。STM32 仅在 BALANCE_RUNNING 接收目标，命令不会启动小车。目标速度为每 5 ms 的平均编码器计数，转向为每 5 ms 两轮计数差；方向和实际响应需实测。
 目标帧共 10 字节：5A A5 01 02，速度和转向各为 int16 小端、数值乘 100，末尾 CRC16/CCITT-FALSE 小端，覆盖版本至转向共 6 字节。USART1 双向独立；状态仍为 A5 5A 开头 32 字节。
+
+动态图背景：从视频按 30 帧/秒提取 92 帧并循环，画面等比例缩放为 240x135 居中显示、上下留白。RGB565 调色板和 8 位像素索引共约 3027904 字节；需要足够大的 Arduino 程序分区。每帧优先刷新动画区域，大约每 200 ms 更新包含状态文字的全屏。屏幕按 4 行分块刷新，帧率跟随经过时间并可能跳帧，实际效果和 40 MHz 稳定性需实测。

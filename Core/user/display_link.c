@@ -13,19 +13,22 @@ static uint8_t rx_byte, rx_data[RX_SIZE];
 static volatile uint16_t rx_head, rx_tail;
 static volatile uint8_t rx_error;
 
+/* 拆分16/32bit转成单字节 */
 static void put16(uint8_t *p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
 static void put32(uint8_t *p, int32_t v) {
     uint32_t u=(uint32_t)v;
     p[0]=(uint8_t)u; p[1]=(uint8_t)(u>>8); p[2]=(uint8_t)(u>>16); p[3]=(uint8_t)(u>>24);
 }
-// Fixed point in hundredths; clamp before conversion (including infinities).
+/* 将浮点数放大100倍成整形，解放Flash
+ * x != x 因为NULL != NULL 排空处理
+ */
 static int32_t to100(float x) {
     if (x != x) return 0;
     if (x >= 20000000.0f) return INT32_C(2000000000);
     if (x <= -20000000.0f) return -INT32_C(2000000000);
     return (int32_t)(x * 100.0f);
 }
-// CRC-16/CCITT-FALSE: poly 0x1021, initial 0xffff, no reflection, xorout 0.
+// CRC校验
 static uint16_t crc16(const uint8_t *p, unsigned len) {
     uint16_t crc=0xffffU;
     while(len--) {
@@ -40,9 +43,10 @@ HAL_StatusTypeDef DisplayLink_Init(UART_HandleTypeDef *uart) {
     rx_head=rx_tail=0U; rx_error=0U;
     return HAL_UART_Receive_IT(link_uart, &rx_byte, 1U);
 }
+//设置为小端传输模式
 HAL_StatusTypeDef DisplayLink_SendStatus(const DisplayStatus *s) {
     if (!link_uart || !s) return HAL_ERROR;
-    // Only main calls this function. The ISR can clear busy but never writes tx_frame.
+    // 打包数据到设置发送出去，接收方拼接
     if (tx_busy) return HAL_BUSY;
     tx_frame[0]=0xA5U; tx_frame[1]=0x5AU; tx_frame[2]=1U; tx_frame[3]=PAYLOAD_SIZE;
     put16(&tx_frame[4], sequence++);
@@ -56,9 +60,11 @@ HAL_StatusTypeDef DisplayLink_SendStatus(const DisplayStatus *s) {
     if(result != HAL_OK) tx_busy=0U;
     return result;
 }
+// 发送完成标准复位，0是完成了
 void DisplayLink_OnTxComplete(UART_HandleTypeDef *uart) {
     if(uart==link_uart) tx_busy=0U;
 }
+// 环形缓冲区进行接收数据
 void DisplayLink_OnRxComplete(UART_HandleTypeDef *uart) {
     if(uart!=link_uart) return;
     uint16_t next=(uint16_t)((rx_head+1U)%RX_SIZE);
@@ -66,11 +72,10 @@ void DisplayLink_OnRxComplete(UART_HandleTypeDef *uart) {
     else { rx_data[rx_head]=rx_byte; rx_head=next; }
     if(HAL_UART_Receive_IT(link_uart,&rx_byte,1U)!=HAL_OK) rx_error=1U;
 }
+// 出错返回接收
 void DisplayLink_OnError(UART_HandleTypeDef *uart) {
     if(uart!=link_uart) return;
     rx_error=1U;
-    // UART RX errors are recovered by rearming reception; TX buffer remains owned
-    // by HAL until the TX completion callback, so it is never overwritten here.
     (void)HAL_UART_Receive_IT(link_uart,&rx_byte,1U);
 }
 uint8_t DisplayLink_ReadByte(uint8_t *out) {
@@ -84,6 +89,7 @@ uint8_t DisplayLink_TakeRxError(void) {
     __set_PRIMASK(mask); return e;
 }
 
+// 接收ESP32发来的控制命令，小端拼接
 // Control frame: 5A A5, version 01, type 02, two little-endian signed
 // hundredths (speed, turn), CRC-16/CCITT-FALSE over bytes 2..7, LE.
 uint8_t DisplayLink_PollCommand(float *speed, float *turn) {

@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <string.h>
 #define STRIP_ROWS 4U
-#define FRAME_INTERVAL_MS 200U
 #define TEXT_ROWS 10U
 #define BACKGROUND_COLOR 0xFFFFU
 struct InitCommand { uint8_t command, count, data[14]; uint16_t delay_ms; };
@@ -20,14 +19,16 @@ static const InitCommand init_commands[] = {
  {0x21,0,{0},0}, {0x29,0,{0},20}
 };
 static SPIClass displaySPI(FSPI);
-static SPISettings settings(10000000, MSBFIRST, SPI_MODE0);
+static SPISettings settings(40000000, MSBFIRST, SPI_MODE0);
 static uint8_t pixels[ST7789_WIDTH * STRIP_ROWS * 2U];
 static ST7789_Status latest{}, snapshot{};
 static bool link_online=false, frame_online=false;
-static uint8_t lcd_status=0, text_row=0, text_y=0, drawing=0, init_phase=0, init_index=0;
-static uint16_t clear_y=0, foreground=0;
-static uint32_t wait_until=0, frame_ms=0;
+static uint8_t lcd_status=0, text_row=0, drawing=0, init_phase=0, init_index=0;
+static uint8_t animation_frame=0;
+static uint16_t draw_y=0, draw_end=ST7789_HEIGHT, foreground=0;
+static uint32_t wait_until=0, frame_ms=0, animation_epoch=0, last_full_ms=0;
 static char text[21];
+static char frame_text[TEXT_ROWS][21];
 static void cmd(uint8_t c, const uint8_t *data=nullptr, uint8_t n=0) {
  displaySPI.beginTransaction(settings); digitalWrite(ST7789_PIN_CS, LOW);
  digitalWrite(ST7789_PIN_DC, LOW); displaySPI.transfer(c);
@@ -49,7 +50,7 @@ void ST7789_Init(void) {
  pinMode(ST7789_PIN_CS,OUTPUT); pinMode(ST7789_PIN_DC,OUTPUT); pinMode(ST7789_PIN_RST,OUTPUT);
  if(ST7789_PIN_BL>=0) { pinMode(ST7789_PIN_BL,OUTPUT); digitalWrite(ST7789_PIN_BL,HIGH); }
  digitalWrite(ST7789_PIN_CS,HIGH); displaySPI.begin(ST7789_PIN_SCK,-1,ST7789_PIN_MOSI,-1);
- lcd_status=0; init_phase=0; init_index=0; clear_y=0; drawing=0; latest={};
+ lcd_status=0; init_phase=0; init_index=0; draw_y=0; drawing=0; animation_frame=0; latest={};
  digitalWrite(ST7789_PIN_RST,LOW); wait_until=millis()+20U;
 }
 void ST7789_SetLinkOnline(bool online) { link_online=online; }
@@ -75,19 +76,12 @@ static void format_line(void)
     }
 }
 static uint16_t background_pixel(uint16_t x, uint16_t y) {
-    if (x >= IMAGE_WIDTH || y >= IMAGE_HEIGHT)
+    if (x >= ANIMATION_WIDTH || y < ANIMATION_Y_OFFSET ||
+        y >= ANIMATION_Y_OFFSET + ANIMATION_HEIGHT)
         return BACKGROUND_COLOR;
-    return image_rgb565[(uint32_t)y * IMAGE_WIDTH + x];
-}
-static void render_background_strip(uint16_t top)
-{
-    for (uint16_t y=0; y<STRIP_ROWS; ++y) {
-        for (uint16_t x=0; x<ST7789_WIDTH; ++x) {
-            uint16_t color=background_pixel(x, top+y);
-            uint16_t i=(uint16_t)((y*ST7789_WIDTH+x)*2U);
-            pixels[i]=(uint8_t)(color>>8); pixels[i+1U]=(uint8_t)color;
-        }
-    }
+    uint32_t offset=(uint32_t)(y-ANIMATION_Y_OFFSET)*ANIMATION_WIDTH+x;
+    uint8_t index=animation_pixels[animation_frame][offset];
+    return animation_palette[animation_frame][index];
 }
 static bool text_pixel(int x, int y, size_t length) {
     if (x<0 || y<0 || x>=(int)ST7789_WIDTH || y>=16) return false;
@@ -97,18 +91,24 @@ static bool text_pixel(int x, int y, size_t length) {
     return c>=32U && c<=126U &&
         (st7789_font[c-32U][((unsigned)x%12U)/2U] & (1U<<((unsigned)y/2U)));
 }
-static void render_strip(void)
+static void render_strip(uint16_t top)
 {
-    size_t length = strlen(text);
     for (uint16_t y = 0; y < STRIP_ROWS; ++y) {
+        uint16_t screen_y=top+y;
+        int line=(screen_y>=8U) ? (int)((screen_y-8U)/22U) : -1;
+        int ty=(screen_y>=8U) ? (int)((screen_y-8U)%22U) : -1;
+        bool text_area=line>=0 && line<(int)TEXT_ROWS && ty<16;
+        size_t length=0;
+        if (text_area) { memcpy(text,frame_text[line],sizeof(text)); length=strlen(text); }
         for (uint16_t x = 0; x < ST7789_WIDTH; ++x) {
-            int ty=(int)text_y+y;
-            uint16_t color=background_pixel(x,(uint16_t)(8U+text_row*22U+ty));
-            bool glyph=text_pixel(x,ty,length);
-            bool outline=text_pixel((int)x-1,ty,length) || text_pixel((int)x+1,ty,length)
-                || text_pixel(x,ty-1,length) || text_pixel(x,ty+1,length);
-            if (outline) color=0xFFFFU;
-            if (glyph) color=0x07E0U;
+            uint16_t color=background_pixel(x,screen_y);
+            if (text_area) {
+                bool glyph=text_pixel(x,ty,length);
+                bool outline=text_pixel((int)x-1,ty,length) || text_pixel((int)x+1,ty,length)
+                    || text_pixel(x,ty-1,length) || text_pixel(x,ty+1,length);
+                if (outline) color=0xFFFFU;
+                if (glyph) color=0x07E0U;
+            }
             uint16_t index = (uint16_t)((y * ST7789_WIDTH + x) * 2U);
             pixels[index] = (uint8_t)(color >> 8); pixels[index + 1U] = (uint8_t)color;
         }
@@ -122,19 +122,25 @@ void ST7789_Poll(void) {
   if(init_index<sizeof(init_commands)/sizeof(init_commands[0])) {
    const InitCommand &c=init_commands[init_index++]; cmd(c.command,c.data,c.count); wait_until=now+c.delay_ms; return;
   }
-  init_phase=2; return;
- }
- if(init_phase==2) {
-  render_background_strip(clear_y); push_strip(clear_y); clear_y+=STRIP_ROWS;
-  if(clear_y>=ST7789_HEIGHT) { init_phase=3; lcd_status=1; frame_ms=now-FRAME_INTERVAL_MS; }
-  return;
+  init_phase=2; frame_ms=now-ANIMATION_INTERVAL_MS;
+  animation_epoch=now; last_full_ms=now-200U; return;
  }
  if(!drawing) {
-  if((uint32_t)(now-frame_ms)<FRAME_INTERVAL_MS) return;
-  snapshot=latest; frame_online=link_online; frame_ms=now; drawing=1; text_row=text_y=0;
+  if((uint32_t)(now-frame_ms)<ANIMATION_INTERVAL_MS) return;
+  snapshot=latest; frame_online=link_online; frame_ms=now; drawing=1;
+  animation_frame=(uint8_t)((((uint64_t)(uint32_t)(now-animation_epoch)*ANIMATION_FPS)/1000U)%ANIMATION_FRAME_COUNT);
+  if (!lcd_status || (uint32_t)(now-last_full_ms)>=200U) {
+   draw_y=0; draw_end=ST7789_HEIGHT; last_full_ms=now;
+  } else {
+   draw_y=ANIMATION_Y_OFFSET;
+   draw_end=(uint16_t)((ANIMATION_Y_OFFSET+ANIMATION_HEIGHT+STRIP_ROWS-1U)/STRIP_ROWS*STRIP_ROWS);
+  }
+  for (text_row=0; text_row<TEXT_ROWS; ++text_row) {
+   format_line(); memcpy(frame_text[text_row],text,sizeof(text));
+  }
  }
- if(text_y==0) format_line();
- render_strip(); push_strip(8U+text_row*22U+text_y);
- text_y+=STRIP_ROWS;
- if(text_y>=16U) { text_y=0; if(++text_row>=TEXT_ROWS) drawing=0; }
+ render_strip(draw_y); push_strip(draw_y); draw_y+=STRIP_ROWS;
+ if(draw_y>=draw_end) {
+  drawing=0; lcd_status=1;
+ }
 }
