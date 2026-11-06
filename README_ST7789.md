@@ -35,7 +35,7 @@
 打开根目录 `I2C.ioc`，应看到：
 
 - I2C1：PB8/PB9；I2C2：PB10/PB11；两者 Clock Speed 均 100000。
-- SPI1：Transmit Only Master，PB3/PB5 重映射；8位、MSB first、软件 NSS；Mode 3（CPOL High、CPHA 2Edge），Prescaler 4，72MHz / 4 = 18MHz。
+- SPI1：Transmit Only Master，PB3/PB5 重映射；8位、MSB first、软件 NSS；Mode 0（CPOL Low、CPHA 1Edge），Prescaler 4，72MHz / 4 = 18MHz。
 - DMA：SPI1_TX 使用 DMA1_Channel3，Memory to Peripheral、Byte/Byte、内存地址递增、Normal、Low priority。
 - NVIC：DMA1_Channel3 优先级 3；TIM1 更新中断优先级 2，USART1 优先级 1。
 - PA5/PA8/PA15：LCD_CS/LCD_DC/LCD_RES，推挽输出，初始高；PB0：MOTOR_STBY；PC13：STATUS_LED；PC14：MPU_INT 预留输入。
